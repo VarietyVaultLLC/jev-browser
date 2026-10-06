@@ -4,7 +4,7 @@
 //   claude mcp add jev-browser -- node /path/to/jev-browser/bin/jev-browser-mcp.mjs
 //
 // Env: TYPESAFE_API_KEY, JEV_BROWSER_HEADED=1,
-//      JEV_BROWSER_PROFILE=/dir (persistent profile, keeps logins), JEV_BROWSER_LOG=1 (rounds to stderr)
+//      JEV_BROWSER_PROFILE=/dir (persistent profile, keeps logins), JEV_BROWSER_LOG=1 (rounds to stderr), JEV_BROWSER_CDP=http://127.0.0.1:9222 (attach to a running Edge/Chrome), JEV_BROWSER_CHANNEL=msedge (launch installed Edge)
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -13,7 +13,7 @@ import { JevBrowser } from "../src/session.mjs";
 // Holds the launch promise, not the session, so parallel tool calls share one browser.
 let session;
 function browser() {
-  session ??= JevBrowser.launch({ headed: process.env.JEV_BROWSER_HEADED === "1", highlight: process.env.JEV_BROWSER_HEADED === "1", userDataDir: process.env.JEV_BROWSER_PROFILE || undefined })
+  session ??= JevBrowser.launch({ headed: process.env.JEV_BROWSER_HEADED === "1", highlight: process.env.JEV_BROWSER_HEADED === "1", userDataDir: process.env.JEV_BROWSER_PROFILE || undefined, cdpUrl: process.env.JEV_BROWSER_CDP || undefined, channel: process.env.JEV_BROWSER_CHANNEL || undefined })
     .catch(e => { session = undefined; throw e; });
   return session;
 }
