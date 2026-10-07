@@ -65,14 +65,18 @@ export function repeatsBlock(seq, k, times) {
 export class JevBrowser {
   // userDataDir -> persistent profile (logins survive restarts); browser -> share one Chromium.
   // highlight -> outline each target with Jev's decision before acting (for watching a headed run).
-  static async launch({ headed = false, slowMo = 0, viewport = { width: 1280, height: 800 }, storageState, browser, userDataDir, highlight = false } = {}) {
+  static async launch({ headed = false, slowMo = 0, viewport = { width: 1280, height: 800 }, storageState, browser, userDataDir, highlight = false, cdpUrl, channel } = {}) {
     let context, own = false;
     try {
-    if (userDataDir) {
-      context = await chromium.launchPersistentContext(userDataDir, { headless: !headed, slowMo, viewport });
+    if (cdpUrl) {
+      // attach to an already-running Chromium/Edge started with --remote-debugging-port; we never close it, only disconnect
+      browser = await chromium.connectOverCDP(cdpUrl);
+      context = browser.contexts()[0] ?? await browser.newContext();
+    } else if (userDataDir) {
+      context = await chromium.launchPersistentContext(userDataDir, { headless: !headed, slowMo, viewport, channel });
     } else {
       own = !browser;
-      browser ??= await chromium.launch({ headless: !headed, slowMo });
+      browser ??= await chromium.launch({ headless: !headed, slowMo, channel });
       context = await browser.newContext({ viewport, storageState });
     }
     } catch (e) {
@@ -80,7 +84,7 @@ export class JevBrowser {
       throw e;
     }
     const b = new JevBrowser(browser, context, own);
-    b.highlight = highlight;
+    b.cdp = !!cdpUrl; b.highlight = highlight;
     b.page = context.pages()[0] ?? await context.newPage();
     return b;
   }
@@ -585,5 +589,6 @@ export class JevBrowser {
   }
 
   async screenshot({ path, fullPage = false } = {}) { return this.page.screenshot({ path, fullPage }); }
-  async close() { await this.context.close().catch(() => {}); if (this.ownBrowser) await this.browser.close().catch(() => {}); }
+  async close() { if (this.cdp) { await this.browser.close().catch(() => {}); return; }   // CDP: disconnect only, leave the user's browser open
+    await this.context.close().catch(() => {}); if (this.ownBrowser) await this.browser.close().catch(() => {}); }
 }
