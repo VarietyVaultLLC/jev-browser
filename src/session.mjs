@@ -6,11 +6,12 @@
 //   await b.check("Is the user logged in?");          // -> probability
 //
 // Per round, one Jev request asks: done (two wordings), blocked, error, irreversible, tool,
-// target, value. Pages with more than MAX_SINGLE elements go through two stages (group, then
-// element). Follow-up requests are made only when needed: a key to press, a drag destination,
+// target, value. Pages too big for one request (see budget.mjs) are split into chunks: each chunk
+// nominates its best elements, then one final request picks among them and answers the rest. Follow-up requests are made only when needed: a key to press, a drag destination,
 // an option to select, or a stricter "is it done" when the answers disagree.
 import { chromium } from "playwright";
 import { jev } from "./jev.mjs";
+import { fits, chunkElements, compactPage, pageHead, MAX_OPTIONS, DIGEST_MAX_TOKENS } from "./budget.mjs";
 import { ENUMERATE, EXTRACT_BLOCKS } from "./page-script.mjs";
 import { FIELDISH, SELECTISH, FILEISH, brief, pageDiff, repeatedElements, formatPage, formatDiff, redactPage } from "./page-model.mjs";
 import { normalizeBlocks, batchBlocks, batchQuestions, pickBlocks, readResult, totalChars, MIN_PRUNE_CHARS, BUDGET_CHARS, DROP_BELOW, MAX_JEV_CALLS } from "./prune.mjs";
@@ -39,9 +40,14 @@ const GUARDED = new Set(["click", "press_enter", "press_key"]);
 export const SAFE_DIALOGS = d => ["alert", "beforeunload"].includes(d.type());
 export const ACCEPT_DIALOGS = () => true;
 
-const MAX_SINGLE = 240;          // choice questions accept at most 255 options
-const MAX_STATE_CHARS = 70_000;  // requests are capped at 32,768 input tokens
-const GROUP = 30;
+const MAX_SINGLE = MAX_OPTIONS;   // choice questions accept at most 255 options
+
+// Run fn over items with at most `n` in flight; results keep the input order.
+async function mapLimit(items, n, fn) {
+  const out = new Array(items.length); let next = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (next < items.length) { const k = next++; out[k] = await fn(items[k]); } }));
+  return out;
+}
 
 // Short, model-readable reason for a failed Playwright action.
 export function actionError(e) {
@@ -194,11 +200,20 @@ export class JevBrowser {
     return r;
   }
 
+  // State for a question about the page as a whole: the page itself when it fits, else its head plus
+  // a digest of every element (see compactPage). `omitted` > 0 when stateful elements were cut.
+  wholePage(page, extra, questions) {
+    if (fits({ page, ...extra }, questions)) return { state: { page, ...extra }, omitted: 0 };
+    const c = compactPage(page, { extra, questions });
+    return { state: { page: c.page, ...extra }, omitted: c.omittedControls };
+  }
+
   // Yes/no question about the current page -> probability.
   async check(question) {
     await this.settle();
     const page = await this.snapshot();
-    const { answers } = await this.call({ page }, { q: { type: "noul", instructions: `Answer about \`page\`: ${question}` } });
+    const qs = { q: { type: "noul", instructions: `Answer about \`page\`: ${question}` } };
+    const { answers } = await this.call(this.wholePage(page, {}, qs).state, qs);
     return answers.q.noul;
   }
 
@@ -207,7 +222,8 @@ export class JevBrowser {
     await this.settle();
     const page = await this.snapshot();
     const criteria = Array.isArray(options) ? Object.fromEntries(options.map(o => [o, null])) : options;
-    const { answers } = await this.call({ page }, { q: { type: "choice", instructions: `Answer about \`page\`: ${question}`, criteria } });
+    const qs = { q: { type: "choice", instructions: `Answer about \`page\`: ${question}`, criteria } };
+    const { answers } = await this.call(this.wholePage(page, {}, qs).state, qs);
     return { choice: answers.q.choice, probabilities: answers.q.probabilities, confidence: answers.q.confidence };
   }
 
@@ -292,30 +308,60 @@ export class JevBrowser {
     if (Object.keys(values).length) common.value = { type: "choice", instructions: "If the next action toward `task.goal` types, selects or uploads something, which of `task.values` should it use? Prefer values not yet entered on `page`.", criteria: Object.fromEntries(Object.entries(values).map(([k, v]) => [k, String(v).slice(0, 200)])) };
     const targetQ = { type: "choice", instructions: "Which entry of `page.elements` (by its `i`) should the next action toward `task.goal` act on?" };
 
-    if (page.elements.length <= MAX_SINGLE && JSON.stringify(page).length <= MAX_STATE_CHARS) {
-      targetQ.criteria = Object.fromEntries(page.elements.map(e => [String(e.i), null]));
-      const r = await this.call({ page, task }, { ...common, ...(page.elements.length ? { target: targetQ } : {}) });
+    const single = { ...common, ...(page.elements.length ? { target: { ...targetQ, criteria: Object.fromEntries(page.elements.map(e => [String(e.i), null])) } } : {}) };
+    if (fits({ page, task }, single)) {
+      const r = await this.call({ page, task }, single);
       return { ...r.answers, stages: 1 };
     }
-    // Two stages: groups of consecutive elements, then elements in the likeliest groups.
-    const groups = [];
-    for (let k = 0; k < page.elements.length; k += GROUP) {
-      const els = page.elements.slice(k, k + GROUP);
-      groups.push({ g: groups.length, summary: els.map(e => (e.label || e.text || e.placeholder || e.href || e.tag).slice(0, 24)).join(" | ").slice(0, 700) });
+    return this.decideChunked(page, task, common, targetQ);
+  }
+
+  // A page too big for one request (tokens, or more than 255 options). Every element stays in play:
+  //   1. split the elements into chunks that each fit and ask only the target question of each;
+  //   2. keep each chunk's strongest candidates and make ONE final call that picks among them and
+  //      answers every page-level question (done, blocked, error, login, irreversible, tool, value).
+  // The final call sees the page head (url, title, text, dialogs, counts), the candidates in full
+  // and a one-line digest of every element, so the status questions never go unasked because of
+  // size. If the digest itself had to be cut (more elements than fit), "done" is capped below the
+  // done threshold: an uncertain big page ends as likely_done / needs a look, never as a false done.
+  async decideChunked(page, task, common, targetQ) {
+    const head = pageHead(page);
+    const { cands, chunks } = await this.shortlist(page.elements, {
+      head, taskState: { task }, question: targetQ, reserve: DIGEST_MAX_TOKENS,
+      finalQuestions: els => ({ ...common, target: { ...targetQ, criteria: Object.fromEntries(els.map(e => [String(e.i), null])) } }),
+    });
+    const note = " `page.elements` lists only the strongest candidates; `page.all_elements` lists every element on the page, one short line each (id tag name state).";
+    const questions = Object.fromEntries(Object.entries({ ...common, target: { ...targetQ, criteria: Object.fromEntries(cands.map(e => [String(e.i), null])) } })
+      .map(([k, q]) => [k, k === "target" || k === "tool" || k === "value" ? q : { ...q, instructions: q.instructions + note }]));
+    const compact = compactPage(page, { extra: { task }, questions, keep: cands });
+    const r = await this.call({ page: compact.page, task }, questions);
+    const out = { ...r.answers, stages: 2, chunks, candidates_pooled: cands.length };
+    if (compact.omittedControls) {
+      out.degraded = `${compact.omittedControls} stateful elements of ${page.elements.length} could not be listed for the status questions`;
+      for (const k of ["done", "done_change"]) if (out[k]) out[k] = { ...out[k], noul: Math.min(out[k].noul, 0.49) };
     }
-    const lite = { url: page.url, title: page.title, text: page.text, metrics: page.metrics, dialogs: page.dialogs, groups };
-    const r1 = await this.call({ page: lite, task }, {
-      ...common,
-      group: { type: "choice", instructions: "Which entry of `page.groups` (by its `g`) contains the element the next action toward `task.goal` should act on? Each group summarises consecutive page elements.", criteria: Object.fromEntries(groups.map(g => [String(g.g), null])) },
-    });
-    const ranked = Object.entries(r1.answers.group.probabilities).sort((a, b) => b[1] - a[1]);
-    const pick = []; let mass = 0;
-    for (const [g, p] of ranked) { if (pick.length && (mass >= 0.9 || pick.length >= 4)) break; pick.push(+g); mass += p; }
-    const sub = page.elements.filter(e => pick.includes(Math.floor(e.i / GROUP))).slice(0, MAX_SINGLE);
-    const r2 = await this.call({ page: { url: page.url, title: page.title, text: page.text.slice(0, 1200), elements: sub }, task }, {
-      target: { ...targetQ, criteria: Object.fromEntries(sub.map(e => [String(e.i), null])) },
-    });
-    return { ...r1.answers, target: r2.answers.target, stages: 2, groups_considered: pick };
+    return out;
+  }
+
+  // Narrow `elements` to a set that fits next to `finalQuestions(set)`: chunk, ask `question` of
+  // each chunk, keep the top few of each. Repeats if the pooled winners still do not fit.
+  async shortlist(elements, { head, taskState, question, name = "target", reserve = 0, finalQuestions }) {
+    let cands = elements, chunks = 0;
+    const fitsFinal = els => fits({ page: { ...head, elements: els }, ...taskState }, finalQuestions(els), reserve);
+    while (!fitsFinal(cands)) {
+      const parts = chunkElements(cands, { head, taskState, question, name });
+      const keep = Math.max(1, Math.min(2, Math.floor(MAX_OPTIONS / parts.length)));
+      const wins = await mapLimit(parts, 3, async part => {
+        const r = await this.call({ page: { ...head, elements: part }, ...taskState }, { [name]: { ...question, criteria: Object.fromEntries(part.map(e => [String(e.i), null])) } });
+        const top = Object.entries(r.answers[name].probabilities).sort((x, y) => y[1] - x[1]).slice(0, keep).map(([i]) => i);
+        return part.filter(e => top.includes(String(e.i)));
+      });
+      chunks += parts.length;
+      const next = wins.flat();
+      if (next.length >= cands.length) throw new Error(`page too large to narrow: ${cands.length} elements do not fit in a Jev request even one per chunk`);
+      cands = next;
+    }
+    return { cands, chunks };
   }
 
   // Resolve independent tool/target/value answers into one consistent action.
@@ -473,15 +519,17 @@ export class JevBrowser {
         round, done: +done.toFixed(2), done_plain: +a.done.noul.toFixed(2), done_change: +(a.done_change?.noul ?? 0).toFixed(2),
         blocked: +a.blocked.noul.toFixed(2), error_shown: +a.error.noul.toFixed(2), login: +a.login.noul.toFixed(2), irreversible: +a.irreversible.noul.toFixed(2),
         tool: act.tool, p_tool: +act.p_tool.toFixed(2), target: act.target, p_target: +act.p_target.toFixed(2), el: brief(act.el),
-        value: act.valueKey, elements: page.elements.length, stages: a.stages, candidates: act.candidates,
+        value: act.valueKey, elements: page.elements.length, stages: a.stages, ...(a.chunks ? { chunks: a.chunks } : {}), ...(a.degraded ? { degraded: a.degraded } : {}), candidates: act.candidates,
       };
       rounds.push(r);
-      log(`  r${round}: ${act.tool}(${r.p_tool}) -> #${act.target} ${r.el} (${r.p_target})${act.valueKey ? ` value=${act.valueKey}` : ""}  done=${r.done} err=${r.error_shown} login=${r.login} irrev=${r.irreversible}  [${page.elements.length} els${a.stages === 2 ? ", 2-stage" : ""}]`);
+      log(`  r${round}: ${act.tool}(${r.p_tool}) -> #${act.target} ${r.el} (${r.p_target})${act.valueKey ? ` value=${act.valueKey}` : ""}  done=${r.done} err=${r.error_shown} login=${r.login} irrev=${r.irreversible}  [${page.elements.length} els${a.stages === 2 ? `, chunked: ${a.chunks} chunks -> ${a.candidates_pooled}` : ""}${a.degraded ? ", DEGRADED" : ""}]`);
 
       if (round > 0 && done >= doneAt && done < 0.85 && act.tool !== "none") {
         // "done" and "next action" disagree: settle it with a stricter single question
-        const c = await this.call({ page, task: { goal, history: history.slice(-12) } }, { complete: { type: "noul", instructions: "Is everything `task.goal` asks for already finished on `page`, so that no further action (such as pressing a submit, search or continue button) is needed?" } });
-        r.confirm = +c.answers.complete.noul.toFixed(2);
+        const cq = { complete: { type: "noul", instructions: "Is everything `task.goal` asks for already finished on `page`, so that no further action (such as pressing a submit, search or continue button) is needed?" } };
+        const cw = this.wholePage(page, { task: { goal, history: history.slice(-12) } }, cq);
+        const c = await this.call(cw.state, cq);
+        r.confirm = +(cw.omitted ? Math.min(c.answers.complete.noul, 0.44) : c.answers.complete.noul).toFixed(2);   // a cut digest never confirms "done"
         log(`     confirm=${r.confirm}`);
         if (r.confirm >= 0.65) { status = "done"; break; }
         if (r.confirm >= 0.45) { status = "likely_done"; info = "the page looks done but Jev is unsure; verify with a check, snapshot or screenshot"; break; }
@@ -521,7 +569,8 @@ export class JevBrowser {
 
       // follow-up questions only for the chosen action
       if (act.tool === "select" && act.value == null && act.el?.options?.length) {
-        const { answers } = await this.call({ page, task: { goal }, dropdown: act.el }, { opt: { type: "choice", instructions: "Which option of `dropdown.options` should be chosen for `task.goal`?", criteria: Object.fromEntries(act.el.options.map(o => [o, null])) } });
+        const oq = { opt: { type: "choice", instructions: "Which option of `dropdown.options` should be chosen for `task.goal`?", criteria: Object.fromEntries(act.el.options.map(o => [o, null])) } };
+        const { answers } = await this.call(this.wholePage(page, { task: { goal }, dropdown: act.el }, oq).state, oq);
         act.value = answers.opt.choice; act.valueKey = undefined;
       }
       if (act.tool === "press_key") {
@@ -530,9 +579,18 @@ export class JevBrowser {
         const tgt = act.el; if (!tgt || !(FIELDISH(tgt) || tgt.tag.startsWith("input"))) act.target = null;   // page-level key press
       }
       if (act.tool === "drag") {
-        const others = page.elements.filter(e => e.i !== act.target).slice(0, MAX_SINGLE);
+        const others = page.elements.filter(e => e.i !== act.target);
         if (!others.length) { status = "stuck"; info = "nothing on the page to drop onto"; break; }
-        const { answers } = await this.call({ page: { ...page, elements: others }, task: { goal, dragging: brief(act.el) } }, { dest: { type: "choice", instructions: "Onto which entry of `page.elements` (by its `i`) should `task.dragging` be dropped for `task.goal`?", criteria: Object.fromEntries(others.map(e => [String(e.i), null])) } });
+        const dq = { type: "choice", instructions: "Onto which entry of `page.elements` (by its `i`) should `task.dragging` be dropped for `task.goal`?" };
+        const taskState = { task: { goal, dragging: brief(act.el) } };
+        const crit = els => ({ ...dq, criteria: Object.fromEntries(els.map(e => [String(e.i), null])) });
+        // a page too big for one request: chunks nominate drop targets, the final call picks among them
+        const { cands } = await this.shortlist(others, { head: pageHead(page), taskState, question: dq, name: "dest", finalQuestions: els => ({ dest: crit(els) }) });
+        // the whole page only when it was not chunked AND still fits with its full text; shortlist
+        // measured the page head, so anything else gets the head
+        const whole = { page: { ...page, elements: cands }, ...taskState };
+        const state = cands.length === others.length && fits(whole, { dest: crit(cands) }) ? whole : { page: { ...pageHead(page), elements: cands }, ...taskState };
+        const { answers } = await this.call(state, { dest: crit(cands) });
         act.destination = +answers.dest.choice;
         r.destination = brief(page.elements.find(e => e.i === act.destination));
       }
