@@ -63,6 +63,10 @@ export const TASKS = [
   // ---------------------------------------------------------------- real sites / navigation
   { id: "hn-comments", cat: "navigation", url: "https://news.ycombinator.com/",
     steps: [{ goal: "Open the comments page of the top story", assert: "() => location.pathname === '/item'" }] },
+  { id: "hn-more", cat: "large-page", url: "https://news.ycombinator.com/",
+    steps: [{ goal: "Go to the next page of stories with the More link at the bottom", assert: "() => new URLSearchParams(location.search).get('p') === '2'" }] },
+  { id: "wiki-history-older", cat: "large-page", url: "https://en.wikipedia.org/w/index.php?title=Alan_Turing&action=history",
+    steps: [{ goal: "Show the next older 50 revisions", assert: "() => new URLSearchParams(location.search).has('offset')" }] },
   { id: "books-poetry", cat: "navigation", url: "https://books.toscrape.com/",
     steps: [
       { goal: "Open the Poetry category", assert: "() => location.pathname.includes('poetry')" },

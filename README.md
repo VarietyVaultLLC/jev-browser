@@ -44,8 +44,8 @@ candidates, and code turns disagreement or low confidence into a status the LLM 
 
 Works on: forms, native and custom dropdowns, checkboxes and radios (including styled
 replacements), dynamic loading, modals, JS dialogs, hover, right-click, drag and drop, key
-presses, file upload, iframes, shadow DOM, new tabs, pages with 2,000+ elements (two-stage
-selection), and non-English UIs.
+presses, file upload, iframes, shadow DOM, new tabs, pages with 2,000+ elements (chunked
+selection: every element is asked about, none dropped), and non-English UIs.
 
 Known limits, so write steps around them:
 - **Ordered sub-goals in one step** ("add two todos, complete one, clear completed") → split
@@ -248,7 +248,8 @@ Private sites and credentials go in `bench/tasks.local.mjs` (git-ignored), expor
 ## Layout
 
 ```
-src/session.mjs      JevBrowser: settle, snapshot, decide (1 or 2 stages), resolve, act, do, check, choose
+src/session.mjs      JevBrowser: settle, snapshot, decide (one request, or chunks plus a final pick), resolve, act, do, check, choose
+src/budget.mjs       token estimate, chunking and element digest for requests that exceed TypeSafe's limits
 src/page-script.mjs  runs in each frame: elements, labels, state, visible text, metrics, dialogs
 src/page-model.mjs   pure helpers: diff between pages, counts, compact rendering
 src/prune.mjs        pure helpers: split page text into blocks, batch, rank, reassemble
