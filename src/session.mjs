@@ -586,7 +586,11 @@ export class JevBrowser {
         const crit = els => ({ ...dq, criteria: Object.fromEntries(els.map(e => [String(e.i), null])) });
         // a page too big for one request: chunks nominate drop targets, the final call picks among them
         const { cands } = await this.shortlist(others, { head: pageHead(page), taskState, question: dq, name: "dest", finalQuestions: els => ({ dest: crit(els) }) });
-        const { answers } = await this.call({ page: { ...(cands.length === others.length ? page : pageHead(page)), elements: cands }, ...taskState }, { dest: crit(cands) });
+        // the whole page only when it was not chunked AND still fits with its full text; shortlist
+        // measured the page head, so anything else gets the head
+        const whole = { page: { ...page, elements: cands }, ...taskState };
+        const state = cands.length === others.length && fits(whole, { dest: crit(cands) }) ? whole : { page: { ...pageHead(page), elements: cands }, ...taskState };
+        const { answers } = await this.call(state, { dest: crit(cands) });
         act.destination = +answers.dest.choice;
         r.destination = brief(page.elements.find(e => e.i === act.destination));
       }
