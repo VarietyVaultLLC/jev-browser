@@ -51,6 +51,7 @@ export function pageHead(page) {
   const h = { url: page.url, title: page.title, text: (page.text ?? "").slice(0, SUMMARY_TEXT_CHARS), metrics: page.metrics };
   if (page.dialogs?.length) h.dialogs = page.dialogs;
   if (page.repeated_elements) h.repeated_elements = page.repeated_elements;
+  if (page.webmcp_tools) h.webmcp_tools = page.webmcp_tools;   // the final call's use_tool / webmcp_tool questions point at it
   return h;
 }
 

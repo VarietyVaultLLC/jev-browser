@@ -1,0 +1,12 @@
+{
+  "name": "jev-browser",
+  "owner": { "name": "Ying-Kai Liao", "url": "https://github.com/Ying-Kai-Liao" },
+  "description": "Jev Browser: browser automation for Claude, driven by a fast decision model.",
+  "plugins": [
+    {
+      "name": "jev-browser",
+      "source": "./",
+      "description": "Browser automation where Claude plans one outcome at a time and Jev picks every click and keystroke."
+    }
+  ]
+}

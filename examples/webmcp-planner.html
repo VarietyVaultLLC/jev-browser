@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Planner · WebMCP</title>
+<style>
+  :root { --ink: #1d1d1b; --muted: #6b6b66; --line: #e3e3df; --bg: #f6f6f4; --tool: #7c6cf0; --click: #e5484d; --high: #d9480f; }
+  * { box-sizing: border-box; }
+  body { font: 15px/1.45 system-ui, sans-serif; margin: 0; display: grid; grid-template-columns: 1fr 400px; height: 100vh; background: var(--bg); color: var(--ink); }
+  main { padding: 28px 32px; overflow: auto; }
+  h1 { margin: 0; font-size: 24px; } .sub { color: var(--muted); margin: 2px 0 16px; font-size: 13px; }
+  form { display: flex; gap: 8px; margin-bottom: 14px; }
+  input[type=text] { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid #d3d3ce; border-radius: 8px; }
+  select { font: inherit; padding: 7px 8px; border: 1px solid #d3d3ce; border-radius: 8px; background: #fff; }
+  button { font: 600 13px system-ui; padding: 7px 12px; border: 0; border-radius: 8px; background: var(--ink); color: #fff; cursor: pointer; }
+  .bar { display: flex; gap: 6px; align-items: center; margin-bottom: 14px; }
+  .tab { background: #ecebe7; color: var(--ink); } .tab[aria-selected=true] { background: var(--ink); color: #fff; }
+  .bar .spacer { flex: 1; } #status { color: #2f9e44; font-size: 13px; font-weight: 600; } #clear { background: #fff; color: var(--ink); border: 1px solid var(--line); }
+  .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .col { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 12px; min-height: 120px; }
+  .col h2 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .col h2 span { font-weight: 400; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 6px; margin: 3px 0; background: #fafaf8; animation: in .25s; }
+  li .t { flex: 1; } li.done .t { text-decoration: line-through; color: #9a9a94; }
+  .pri { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 99px; background: #ecebe7; color: var(--muted); }
+  .pri.high { background: #ffe8dc; color: var(--high); } .pri.low { opacity: .6; }
+  li input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: #2f9e44; }
+  .flash { animation: flash .7s; } @keyframes flash { 0%, 50% { box-shadow: 0 0 0 3px var(--tool); } }
+  aside { background: #16161a; color: #d8d8de; padding: 20px; font: 12px/1.45 ui-monospace, monospace; overflow: auto; }
+  aside h2 { font: 600 11px system-ui; letter-spacing: .08em; text-transform: uppercase; color: #8a8a96; margin: 0 0 4px; }
+  .legend { color: #8a8a96; margin-bottom: 12px; } .legend b { font-weight: 600; }
+  .ev { border-left: 3px solid var(--tool); padding: 4px 8px; margin: 0 0 6px; background: #1f1f26; border-radius: 0 6px 6px 0; animation: in .2s; }
+  .ev.click { border-color: var(--click); } .ev b { color: #b7adff; } .ev.click b { color: #ff9c9f; } .ev .ret { color: #7fd1a3; }
+  .ev .key::before { content: attr(data-k) " → "; color: #b7adff; } .ev .val { color: #f2f2f5; } .ev .arg { color: #8a8a96; }
+  .count { color: #8a8a96; margin-bottom: 10px; }
+  @keyframes in { from { opacity: 0; transform: translateY(3px); } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Planner</h1>
+  <p class="sub">The controls are for people. The page also registers WebMCP tools; an agent may call those instead.</p>
+  <form id="add">
+    <input id="text" type="text" placeholder="New item" aria-label="New item">
+    <select id="list" aria-label="List"><option value="groceries">Groceries</option><option value="errands">Errands</option><option value="work">Work</option></select>
+    <select id="priority" aria-label="Priority"><option>low</option><option selected>normal</option><option>high</option></select>
+    <button id="addBtn">Add</button>
+  </form>
+  <div class="bar" role="tablist">
+    <button class="tab" role="tab" data-f="all" aria-selected="true">All</button>
+    <button class="tab" role="tab" data-f="active">Active</button>
+    <button class="tab" role="tab" data-f="done">Done</button>
+    <button class="tab" role="tab" data-f="high">High priority</button>
+    <span class="spacer"></span>
+    <span id="status" role="status"></span>
+    <button id="clear">Clear completed</button>
+  </div>
+  <div class="cols" id="cols"></div>
+</main>
+<aside>
+  <h2>What the agent did</h2>
+  <div class="legend"><b style="color:#b7adff">■</b> WebMCP tool call &nbsp; <b style="color:#ff9c9f">■</b> click on the page</div>
+  <div class="count" id="count"></div>
+  <div id="log"></div>
+</aside>
+<script>
+  const LISTS = ["groceries", "errands", "work"];
+  let items = [], filter = "all", tools = 0, clicks = 0;
+  const $ = id => document.getElementById(id);
+  const shown = it => filter === "all" || (filter === "active" && !it.done) || (filter === "done" && it.done) || (filter === "high" && it.priority === "high");
+
+  function render() {
+    const cols = $("cols"); cols.textContent = "";
+    for (const name of LISTS) {
+      const col = document.createElement("section"); col.className = "col"; col.setAttribute("aria-label", name);
+      const all = items.filter(i => i.list === name), vis = all.filter(shown);
+      const h = document.createElement("h2"); h.textContent = name + " "; const n = document.createElement("span"); n.textContent = `(${vis.length}/${all.length})`; h.append(n); col.append(h);
+      const ul = document.createElement("ul");
+      for (const it of vis) {
+        const li = document.createElement("li"); if (it.done) li.className = "done";
+        const t = document.createElement("span"); t.className = "t"; t.textContent = it.text;
+        const p = document.createElement("span"); p.className = "pri " + it.priority; p.textContent = it.priority;
+        const c = document.createElement("input"); c.type = "checkbox"; c.checked = it.done; c.disabled = it.done; c.dataset.item = it.text; c.setAttribute("aria-label", it.text);
+        c.onchange = () => complete(it.text);
+        li.append(c, t, p);
+        ul.append(li);
+      }
+      col.append(ul); cols.append(col);
+    }
+    for (const tab of document.querySelectorAll(".tab")) tab.setAttribute("aria-selected", String(tab.dataset.f === filter));
+    $("count").textContent = `${tools} tool calls · ${clicks} clicks · ${items.length} items`;
+  }
+
+  const find = text => items.find(i => i.text.toLowerCase() === String(text).trim().toLowerCase());
+  function add(text, list = "groceries", priority = "normal") {
+    text = String(text ?? "").trim();
+    if (!text) return "error: empty text";
+    if (find(text)) return `"${text}" is already on the planner`;
+    if (!LISTS.includes(list)) return `error: unknown list ${list}`;
+    items.push({ text, list, priority, done: false }); render();
+    return `added "${text}" to ${list} (${priority})`;
+  }
+  function complete(text) { const it = find(text); if (!it) return `no item "${text}"`; it.done = true; render(); return `completed "${it.text}"`; }
+  function move(text, list) { const it = find(text); if (!it) return `no item "${text}"`; it.list = list; render(); return `moved "${it.text}" to ${list}`; }
+  function setPriority(text, priority) { const it = find(text); if (!it) return `no item "${text}"`; it.priority = priority; render(); return `"${it.text}" is now ${priority}`; }
+
+  $("add").onsubmit = e => { e.preventDefault(); add($("text").value, $("list").value, $("priority").value); $("text").value = ""; };
+  for (const tab of document.querySelectorAll(".tab")) tab.onclick = () => { filter = tab.dataset.f; render(); };
+  $("clear").onclick = () => { const n = items.filter(i => i.done).length; items = items.filter(i => !i.done); render(); status(n ? `Cleared ${n} completed item${n > 1 ? "s" : ""}` : "Nothing to clear"); };
+  const status = msg => { $("status").textContent = msg; clearTimeout(status.t); status.t = setTimeout(() => { $("status").textContent = ""; }, 4000); };
+
+  // detail: a string, or [[arg, chosen, value]] rows for a tool call
+  function logEv(kind, name, detail, ret) {
+    const d = document.createElement("div"); d.className = "ev " + kind;
+    const b = document.createElement("b"); b.textContent = name; d.append(b);
+    if (typeof detail === "string") { const x = document.createElement("div"); x.textContent = detail; d.append(x); }
+    else for (const [arg, chosen, value] of detail ?? []) {
+      const x = document.createElement("div"), span = (c, t) => { const e = document.createElement("span"); e.className = c; e.textContent = t; x.append(e); };
+      span("arg", arg + ": ");
+      // the values key is drawn by CSS (::before), so it is on screen but not in the page text Jev
+      // reads; seeing its own earlier picks there threw off which value it picked next
+      if (chosen?.startsWith("values.")) { span("key", ""); x.lastChild.dataset.k = chosen; }
+      span("val", JSON.stringify(value));
+      d.append(x);
+    }
+    if (ret) { const r = document.createElement("div"); r.className = "ret"; r.textContent = "→ " + ret; d.append(r); }
+    $("log").prepend(d);
+  }
+  // real clicks (the agent's, via Playwright) show up in the log next to tool calls
+  document.addEventListener("click", e => {
+    const b = e.target.closest("button, input[type=checkbox]"); if (!b || !e.isTrusted) return;
+    clicks++; logEv("click", "click", b.type === "checkbox" ? "☑ " + b.getAttribute("aria-label") : b.textContent.trim()); setTimeout(render);
+  }, true);
+
+  const flash = el => { if (!el) return; el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); };
+  const itemButton = text => [...document.querySelectorAll("li input")].find(b => b.dataset.item?.toLowerCase() === String(text).toLowerCase());
+  const tool = (name, description, properties, required, fn, extra = {}) => document.modelContext.registerTool({
+    name, description, inputSchema: { type: "object", properties, required }, ...extra,
+    async execute(args) {
+      // window.__jevArgKeys (set by the demo) says where Jev took each argument from, e.g. text <- values.g1
+      const chosen = window.__jevArgKeys ?? {}; window.__jevArgKeys = null;
+      const ret = fn(args ?? {}); tools++; logEv("tool", name, Object.entries(args ?? {}).map(([k, v]) => [k, chosen[k], v]), ret); render();
+      return { content: [{ type: "text", text: ret }] };
+    },
+  });
+  const LIST = { type: "string", enum: LISTS, description: "Which list" };
+  const PRI = { type: "string", enum: ["low", "normal", "high"], description: "Priority" };
+  const TEXT = { type: "string", description: "The item's text" };
+  tool("add_item", "Add an item to one of the lists", { text: TEXT, list: LIST, priority: PRI }, ["text", "list"],
+    a => { const r = add(a.text, a.list, a.priority ?? "normal"); flash($("addBtn")); return r; });
+  tool("complete_item", "Mark an item as done", { text: TEXT }, ["text"], a => { flash(itemButton(a.text)); return complete(a.text); });
+  tool("move_item", "Move an item to another list", { text: TEXT, list: LIST }, ["text", "list"], a => move(a.text, a.list));
+  tool("set_priority", "Change an item's priority", { text: TEXT, priority: PRI }, ["text", "priority"], a => setPriority(a.text, a.priority));
+  tool("list_items", "List all items with list, priority and done state", {}, [], () => JSON.stringify(items), { annotations: { readOnlyHint: true } });
+  render();
+</script>
+</body>
+</html>

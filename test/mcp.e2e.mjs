@@ -24,7 +24,7 @@ async function call(name, args = {}) {
 
 try {
 const tools = (await client.listTools()).tools.map(t => t.name);
-assert.deepEqual(tools.sort(), ["browser_act", "browser_check", "browser_choose", "browser_close", "browser_do", "browser_open", "browser_read", "browser_screenshot", "browser_snapshot"]);
+assert.deepEqual(tools.sort(), ["browser_act", "browser_check", "browser_choose", "browser_close", "browser_do", "browser_open", "browser_read", "browser_screenshot", "browser_snapshot", "browser_webmcp_call", "browser_webmcp_tools"]);
 
 await call("browser_open", { url: "https://demo.playwright.dev/todomvc/" });
 let r = await call("browser_do", { goal: "Add a todo item", values: { todo: "buy milk" } });

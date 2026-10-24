@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "jev-browser": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "-p",
+        "jev-browser@0.2.1",
+        "jev-browser-mcp"
+      ],
+      "env": {
+        "TYPESAFE_API_KEY": "${user_config.typesafe_api_key}",
+        "OPENROUTER_API_KEY": "${user_config.openrouter_api_key}",
+        "JEV_BROWSER_HEADED": "${user_config.headed}",
+        "JEV_BROWSER": "${user_config.browser}",
+        "JEV_BROWSER_PROFILE": "${user_config.browser_profile}"
+      }
+    }
+  }
+}

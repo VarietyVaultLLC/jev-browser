@@ -1,6 +1,6 @@
 {
   "name": "jev-browser",
-  "version": "0.1.1",
+  "version": "0.2.1",
   "description": "Browser automation where an LLM plans and Jev (Typesafe System One) makes every per-step decision. Library, CLI and MCP server.",
   "keywords": [
     "mcp",
@@ -11,7 +11,8 @@
     "agent",
     "jev",
     "typesafe",
-    "claude"
+    "claude",
+    "claude-code-plugin"
   ],
   "license": "MIT",
   "author": "Ying-Kai Liao",
@@ -49,7 +50,9 @@
     "bench:cost": "node bench/context-cost.mjs",
     "cost": "node bin/jev-cost.mjs",
     "mcp": "node bin/jev-browser-mcp.mjs",
-    "setup": "npx playwright install chromium"
+    "setup": "npx playwright install chromium",
+    "version": "node scripts/sync-plugin-version.mjs && git add .claude-plugin/plugin.json .mcp.json",
+    "validate": "node scripts/sync-plugin-version.mjs --check && claude plugin validate . --strict"
   },
   "engines": {
     "node": ">=20"

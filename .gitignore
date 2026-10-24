@@ -6,3 +6,6 @@ bench/results/
 bench/tasks.local.mjs
 .profile/
 *.png
+.playwright-mcp/
+.DS_Store
+evals/results/
