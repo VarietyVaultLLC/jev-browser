@@ -3,7 +3,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { chromium } from "playwright";
 import { JevBrowser, repeatsBlock, actionError } from "../src/session.mjs";
-import { pageDiff, formatPage, repeatedElements } from "../src/page-model.mjs";
+import { pageDiff, formatPage, repeatedElements, pickCloser, redactValues, REDACTED } from "../src/page-model.mjs";
 
 const FIXTURE = `<!doctype html><html><head><title>Fixture</title>
 <style>.ghost{opacity:0;position:absolute} .hidden{display:none} .sizerow{position:relative;width:320px;height:90px} .sizerow input{opacity:0;position:absolute;inset:0;width:320px;height:90px;margin:0} .sizerow label{position:relative;display:block;width:320px;height:90px} .sizeinner{height:100%} .vh{position:absolute;top:0;left:0;width:1px;height:1px;clip:rect(1px,1px,1px,1px);clip-path:inset(0 0 99.9% 99.9%);margin:0} .colornav-item{position:relative;padding:10px;list-style:none} .colornav-item label{display:block;width:42px;height:42px} th{cursor:default} .clicky{cursor:pointer} .far{margin-top:3000px}</style></head><body>
@@ -402,4 +402,54 @@ test("act: element numbers are matched to the current page, and stale ones are r
   await b2.page.evaluate(() => document.getElementById("rm").remove());
   await assert.rejects(b2.actOn({ action: "click", element: rm }), /no longer on the page/);
   await b2.close();
+});
+
+test("icon-only controls get a hint from id/class; hashes, utilities and images do not", async () => {
+  const b2 = await JevBrowser.launch({ browser });
+  await b2.page.setContent(`<style>a,span{cursor:pointer;display:inline-block;width:20px;height:20px}</style>
+<a class="close" id="_蓋版廣告_關閉"><span class="icon_close"></span></a>
+<a href="https://twitter.com/x" class="sc-bdfBwQ jKlMnO"><span class="sc-gsnTZi"></span></a>
+<button class="inline-flex items-center justify-center rounded-md ring-offset-background transition-colors absolute top-2 right-2"></button>
+<button class="closeButton"></button>
+<button class="btn btn-close"><span class="icon icon-close"></span></button>
+<button class="icon-heart liked active"></button>
+<img class="lazyload img-fluid" src="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2740%27 height=%2740%27/%3E" width="40" height="40">`);
+  const els = (await b2.snapshot()).elements;
+  assert.deepEqual(els.map(e => e.hint ?? null), ["蓋版廣告 關閉 close", null, null, "close button", "close", "heart", null]);
+  assert.equal(els[1].href, "https://twitter.com/x");                  // the hint never hides href
+  assert.match(formatPage({ url: "", title: "", text: "", elements: els }, { interactive: true }), /href=https:\/\/twitter\.com\/x/);
+  await b2.close();
+});
+
+test("pickCloser: plain close controls only, last one wins, never a navigating link", () => {
+  const url = "https://site.test/home?a=1";
+  const E = (i, o) => ({ i, tag: "button", ...o });
+  // "Close position" is a real action, not a dismissal; the overlay's × comes last in the DOM
+  assert.equal(pickCloser([E(1, { text: "Close position" }), E(2, { text: "Close account" }), E(3, { tag: "a", hint: "蓋版廣告 關閉 close" })], url)?.i, 3);
+  assert.equal(pickCloser([E(1, { text: "Close position" })], url), undefined);
+  assert.equal(pickCloser([E(1, { text: "×" }), E(2, { text: "我知道了" })], url)?.i, 2);
+  assert.equal(pickCloser([E(1, { text: "Close", covered: true })], url), undefined);
+  assert.equal(pickCloser([E(1, { text: "Close", disabled: true })], url), undefined);
+  // a hint only counts when there is no text, and must contain the word, not a substring
+  assert.equal(pickCloser([E(1, { text: "Menu", hint: "close" })], url), undefined);
+  assert.equal(pickCloser([E(1, { hint: "closet drawer" })], url), undefined);
+  // links: same-page anchors are dismissals, links elsewhere are not
+  assert.equal(pickCloser([E(1, { tag: "a", text: "Close", href: "/other" })], url), undefined);
+  assert.equal(pickCloser([E(1, { tag: "a", text: "Close", href: "#" })], url)?.i, 1);
+  assert.equal(pickCloser([E(1, { tag: "a", text: "Close", href: "/home?a=1#close" })], url)?.i, 1);
+  assert.equal(pickCloser([E(1, { tag: "a", text: "Close", href: "/home?a=1" })], url), undefined);   // reloads the page
+  assert.equal(pickCloser([E(1, { tag: "div[button]", text: "✕" })], url)?.i, 1);
+});
+
+test("secrets in values are shown to Jev by key only; the real value is still typed", async () => {
+  assert.deepEqual(redactValues({ email: "a@b.com", password: "hunter2", pw: "x", otp_code: "1", card_number: "4242", pin: "9", shipping: "fast" }),
+    { email: "a@b.com", password: REDACTED, pw: REDACTED, otp_code: REDACTED, card_number: REDACTED, pin: REDACTED, shipping: "fast" });
+  const b = Object.create(JevBrowser.prototype);
+  let sent;
+  b.call = async (state, questions) => { sent = JSON.stringify({ state, questions }); return { answers: {} }; };
+  const page = { url: "u", title: "t", text: "", elements: [{ i: 0, tag: "input:password", label: "Password" }] };
+  await b.decide(page, "Log in", { username: "ada", password: "hunter2" }, [], undefined);
+  assert.ok(!sent.includes("hunter2"));
+  assert.ok(sent.includes("ada"));
+  assert.equal(b.resolve(page, { tool: { choice: "type", probabilities: { type: 1 } }, target: { choice: "0", probabilities: { 0: 1 } }, value: { choice: "password" } }, { username: "ada", password: "hunter2" }).value, "hunter2");
 });

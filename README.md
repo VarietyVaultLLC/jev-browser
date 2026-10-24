@@ -24,6 +24,12 @@ Claude ◀── { status: "done", url, actions[], done_score } ─┘
 
 https://github.com/user-attachments/assets/2e688df9-4985-4854-8ebe-ba97c9d13d68
 
+With [WebMCP](#webmcp-when-the-page-offers-its-own-tools), a page offers its own tools. Jev
+chooses between those and the page's buttons, and fills each argument by picking one of the
+caller's `values` (`text: values.g1 → "milk"`), never by writing text:
+
+https://github.com/user-attachments/assets/fe309fb8-aada-4187-a91e-f18493a39526
+
 Jev only answers with probability distributions: yes/no (`noul`), pick one option (`choice`)
 or a rating (`score`). It never writes text. So everything free-form comes from the caller as
 candidates, and code turns disagreement or low confidence into a status the LLM can act on.
@@ -54,15 +60,42 @@ Known limits, so write steps around them:
 - **Judgements that compare many values** (is this table sorted, did exactly one thing change)
   → verify with `browser_check` or `browser_snapshot`.
 
+## Quick start (Claude Code plugin)
+
+```
+/plugin install jev-browser --marketplace Ying-Kai-Liao/jev-browser
+```
+
+On older Claude Code versions, add the marketplace first:
+
+```
+/plugin marketplace add Ying-Kai-Liao/jev-browser
+/plugin install jev-browser@jev-browser
+```
+
+Claude Code then asks for your TypeSafe API key (or an OpenRouter key), which goes to its secure credential store. It
+also offers two optional settings: show the browser window, and a persistent profile directory
+so that logins survive restarts. The plugin runs the MCP server below, pinned to the same
+version, and adds a skill that teaches Claude how to write steps and handle each status. The
+first browser call downloads Chromium for Playwright if it is missing (one time, about 30 s).
+
+Data: see [Privacy](#privacy). Page content goes to the TypeSafe API (or OpenRouter); passwords and other
+secrets you pass in `values` don't.
+
 ## Quick start (MCP, from npm)
 
 ```bash
-npx playwright install chromium          # once
+npx playwright install chromium          # once (the server also does this on first use)
 claude mcp add jev-browser -e TYPESAFE_API_KEY=your-key -- npx -y -p jev-browser jev-browser-mcp
 ```
 
 Any MCP client works the same way: command `npx`, args `-y -p jev-browser jev-browser-mcp`,
 env `TYPESAFE_API_KEY`. Add `JEV_BROWSER_HEADED=1` to watch it work.
+
+No TypeSafe account? Jev is also on [OpenRouter](https://openrouter.ai/typesafe/jev-1.13): pass
+`-e OPENROUTER_API_KEY=your-key` instead, and calls are billed to your OpenRouter account. When both
+keys are set, `TYPESAFE_API_KEY` wins, whether each comes from the environment or `.env`. `JEV_API_URL` and
+`JEV_MODEL` override the TypeSafe endpoint and model; they are ignored when the OpenRouter key is used.
 
 ## Setup (from source)
 
@@ -70,7 +103,7 @@ env `TYPESAFE_API_KEY`. Add `JEV_BROWSER_HEADED=1` to watch it work.
 git clone https://github.com/Ying-Kai-Liao/jev-browser && cd jev-browser
 npm install
 npm run setup                    # downloads Chromium for Playwright
-cp .env.example .env             # add TYPESAFE_API_KEY
+cp .env.example .env             # add TYPESAFE_API_KEY or OPENROUTER_API_KEY
 npm test                         # offline tests (no network, no key)
 npm run test:e2e                 # MCP server end to end (network + key)
 ```
@@ -81,19 +114,43 @@ npm run test:e2e                 # MCP server end to end (network + key)
 claude mcp add jev-browser -- node /absolute/path/to/jev-browser/bin/jev-browser-mcp.mjs
 ```
 
-From a source checkout the server reads `TYPESAFE_API_KEY` from the repo's `.env`.
+From a source checkout the server reads `TYPESAFE_API_KEY` (or `OPENROUTER_API_KEY`) from the repo's `.env`.
 
 | tool | purpose |
 |---|---|
-| `browser_open(url)` | navigate and wait for the page to settle |
+| `browser_open(url, viewport?)` | navigate and wait for the page to settle; `viewport: "390x844"` resizes the window (e.g. to check a phone layout) and the size sticks for later calls |
 | `browser_do(goal, values?, max_actions?, allow_irreversible?, explain?)` | work toward one outcome; returns a status |
 | `browser_check(question)` | yes/no about the page → `p_yes` |
 | `browser_choose(question, options)` | pick among given options → distribution |
 | `browser_snapshot(diff?, interactive?, filter?, urls?, max_chars?)` | compact numbered element list, for taking over; the options below narrow it |
-| `browser_act(action, element, value?, key?, destination?, accept_dialog?)` | act on an element directly, no model; confirm/prompt dialogs are dismissed unless `accept_dialog` |
+| `browser_act(action, element, value?, key?, destination?, accept_dialog?)` | act on an element directly, no model; confirm/prompt dialogs are dismissed unless `accept_dialog`. `scroll` moves the page's main scrollable area (or the box around `element`) by most of a screen, `value: "up"` goes back, and the reply says how far it `scrolled` |
 | `browser_read(question, max_chars?)` | the page text that helps answer a question; Jev drops the rest |
 | `browser_screenshot(full_page?)` | PNG image |
 | `browser_close()` | end the session |
+| `browser_webmcp_tools()` | list the [WebMCP](https://github.com/webmachinelearning/webmcp) tools the page registered |
+| `browser_webmcp_call(name, arguments?)` | run one of the page's WebMCP tools; no clicking, no Jev call |
+
+### WebMCP: when the page offers its own tools
+
+A page that supports [WebMCP](https://github.com/webmachinelearning/webmcp) registers tools for
+agents with `document.modelContext.registerTool(...)` (or `navigator.modelContext.provideContext`
+in earlier drafts). An init script records them before the page's scripts run, in every browser —
+where Chromium has no native `modelContext`, a minimal one is installed so feature-detecting pages
+still register. `browser_open` lists their names as `webmcp_tools`.
+
+**In `browser_do`, Jev uses them.** Each round, the page's tools are offered next to click, type
+and the rest, with a yes/no "can one of the page's tools do the next step?" that decides between
+them. The same request fills every tool's arguments: each is one of your `values` or, for an
+`enum`, one of its options (a list, a priority), because Jev never writes text. The page's own
+`execute` runs, its result goes into the step's history for the "done?" judgement, and the action
+shows as `webmcp tool add_todo {"text":"values.todo"} => "…"`. A tool the site does not mark
+`readOnlyHint` is guarded like a click: if it looks irreversible the step stops with
+`needs_confirmation`.
+
+To call a tool yourself instead, `browser_webmcp_tools` gives each schema and
+`browser_webmcp_call` runs it directly, with no Jev call. Main frame only. Tool descriptions and results come from the site:
+untrusted, and results are capped at 20k chars. A tool not marked `readOnlyHint` may have side
+effects, so the caller should treat it like `allow_irreversible`.
 
 ### Reading a page: `browser_read`
 
@@ -163,8 +220,19 @@ and in a diff. Measured on a Wikipedia article (1,840 elements), a default snaps
 26,919 to 9,926 characters (~6,700 → ~2,500 estimated tokens); `filter` brings it to ~800 and
 `diff` after a scroll to ~50.
 
-Env: `JEV_BROWSER_HEADED=1` shows the browser, `JEV_BROWSER_PROFILE=/dir` keeps a persistent
-profile (logins survive restarts), `JEV_BROWSER_LOG=1` prints per-round decisions to stderr.
+Env: `JEV_BROWSER_HEADED=1` shows the browser, `JEV_BROWSER=chrome` runs your own browser
+instead of Playwright's Chromium (`chrome`, `chrome-beta`, `msedge`, or the path to any
+Chromium-based browser's executable, such as Brave), `JEV_BROWSER_PROFILE=/dir` keeps a persistent
+profile (logins survive restarts; use a dedicated directory, since Chrome won't be automated with
+your everyday profile), `JEV_BROWSER_LOG=1` prints per-round decisions to stderr,
+and `JEV_BROWSER_NO_INSTALL=1` turns off the Chromium download on first use.
+`JEV_BROWSER_CDP=http://127.0.0.1:9222` attaches to a browser you already started with
+`--remote-debugging-port` (e.g. `edge-debug.cmd`, which runs a second Edge on its own profile in
+`C:\EdgeDebug`); the session only disconnects from it and never closes it. Edge and Chrome refuse that
+port on your everyday (default) profile, so an attached browser always runs on a dedicated profile.
+`JEV_BROWSER_CHANNEL` is the older name of `JEV_BROWSER` and still works. The MCP server
+reads `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` from its environment, or from the `.env` of a source checkout, but
+never from the `.env` of the directory it was started in.
 
 ### Library
 
@@ -183,6 +251,8 @@ await b.close();
 ### Watch it
 
 ```bash
+node examples/webmcp-demo.mjs        # headed: 9 plain goals on a planner; Jev picks page tools or clicks, ~25 s
+STEP_MS=800 RECORD=demo.mp4 node examples/webmcp-demo.mjs   # same, paced, recorded at 2x (needs ffmpeg)
 node examples/x-profile-demo.mjs     # headed, read-only x.com walkthrough with decision highlights
 ```
 
@@ -252,10 +322,15 @@ src/session.mjs      JevBrowser: settle, snapshot, decide (one request, or chunk
 src/budget.mjs       token estimate, chunking and element digest for requests that exceed TypeSafe's limits
 src/page-script.mjs  runs in each frame: elements, labels, state, visible text, metrics, dialogs
 src/page-model.mjs   pure helpers: diff between pages, counts, compact rendering
+src/webmcp.mjs       init script recording the page's WebMCP tools; result formatting
 src/prune.mjs        pure helpers: split page text into blocks, batch, rank, reassemble
 src/jev.mjs          System One API client
 src/flow.mjs         JSON flow runner
 bin/                 CLI and MCP server
+.claude-plugin/      Claude Code plugin manifest and the repo's own marketplace
+.mcp.json            the plugin's MCP server: npx jev-browser@<version>, key from plugin settings
+skills/jev-browser/  skill the plugin adds: how to write steps and handle each status
+scripts/             keeps plugin.json and .mcp.json on package.json's version
 bin/jev-cost.mjs     two-sided token ledger: caller tokens vs Jev tokens, measured per scenario
 bench/               tasks with ground-truth checks, runner, context-cost estimate
 test/                offline fixture tests, MCP end-to-end test
@@ -273,8 +348,32 @@ npm version patch            # or minor / major: commits and tags vX.Y.Z
 git push --follow-tags
 ```
 
+`npm version` also sets the version in `.claude-plugin/plugin.json` and the pinned
+`jev-browser@X.Y.Z` in `.mcp.json`, so the plugin always launches the release it ships with.
+CI checks that the three agree and runs `claude plugin validate . --strict` (`npm run validate`
+does both locally). Plugin users get the new version when the marketplace repo updates; the
+directory listing picks it up from the tracked branch.
+
 Publishing uses npm trusted publishing, set up once with
 `npx npm@latest trust github jev-browser --file release.yml --repo Ying-Kai-Liao/jev-browser --allow-publish`.
+
+## Privacy
+
+jev-browser runs locally. It has no server of its own and collects no telemetry. To decide
+each action it sends the following to the TypeSafe System One API (`api.typesafe.ai`), or to
+OpenRouter (`openrouter.ai`) when you use an OpenRouter key, using your key:
+
+- the current page's URL, title, visible text and interactive elements, as well as the text
+  blocks `browser_read` ranks;
+- the step's `goal`, recent action history, and your `browser_check` and `browser_choose`
+  questions;
+- the `values` you pass, **except** those whose key names a secret (`password`, `pw`, `token`,
+  `secret`, `otp`, `card`, `cvv`, `cvc`, `ssn`, `api_key`, `pin`). Those are shown by key only.
+  Values typed into password fields are also redacted, and so is a secret value the page
+  shows back (in its text or a WebMCP tool's result).
+
+Playwright types the real values locally. TypeSafe's (and OpenRouter's) handling of this data
+is covered by their own terms. Screenshots and snapshots go only to your MCP client. See [PRIVACY.md](PRIVACY.md).
 
 ## License
 

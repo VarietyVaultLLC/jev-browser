@@ -29,6 +29,7 @@ jobs:
         run: |
           V=$(node -p 'require("./package.json").version')
           [ "${GITHUB_REF_NAME#v}" = "$V" ] || { echo "tag $GITHUB_REF_NAME does not match package.json version $V"; exit 1; }
+      - run: node scripts/sync-plugin-version.mjs --check   # the plugin pins jev-browser@<this version>
       - name: Publish to npm
         run: |
           V=$(node -p 'require("./package.json").version')

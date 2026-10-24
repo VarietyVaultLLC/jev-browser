@@ -101,6 +101,22 @@ export const ENUMERATE = ({ start, frame }) => {
       const text = (tag === "img" ? clean(el.getAttribute("alt")) : clean(el.innerText)) || labelOf(el) || clean(el.getAttribute("title")) || clean(img?.getAttribute?.("alt") || img?.textContent);
       if (text) o.text = text;
       const label = labelOf(el); if (label && label !== text) o.label = label;
+      // icon-only controls (e.g. <a class="close" id="ad_close"><span class="icon_close">)
+      // have no text at all; their id/class is the only hint of what they do. Kept in its own
+      // field so it never becomes the element's identity (classes change with state) and never
+      // hides href. Hashed / utility / state tokens carry no meaning, so they are dropped.
+      if (!text && tag !== "img") {
+        const cls = n => String(n?.className?.baseVal ?? n?.className ?? "");
+        // camelCase names carry words ("closeButton" -> close button); random hashes ("bdfBwQ",
+        // "gsnTZi") split into 1-2 letter shards, so a token with any such shard is dropped whole.
+        const filler = /^(selected|active|open|checked|disabled|hover|focus|show|hide|hidden|fade|flex|grid|block|inline|items|justify|center|rounded|text|font|medium|bold|icon|btn|liked|absolute|relative|fixed|sticky|static|top|bottom|left|right|full|auto|none|border|shadow|ring|offset|background|transition|colors|duration|ease|cursor|pointer|outline|group|container|wrapper|inner|outer|root|item|link|only|content|overflow|truncate|nowrap|gap|space|default|ustyle|base|mui|css|style|component|wrap)$/i;
+        const words = [el.id, cls(el), cls(el.firstElementChild)].join(" ").split(/[\s_\-:/.]+/).flatMap(t => {
+          const parts = t.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/([A-Z])([A-Z][a-z])/g, "$1 $2").split(" ");
+          return parts.length > 1 && parts.some(x => x.length <= 2) ? [] : parts;
+        }).filter(w => w && (/[^\x00-\x7f]/.test(w) || w.length > 2) && !/\d/.test(w) && !/^[b-df-hj-np-tv-xz]+$/i.test(w) && !filler.test(w));
+        const hint = [...new Set(words.map(w => w.toLowerCase()))].slice(0, 4).join(" ");
+        if (hint) o.hint = hint;
+      }
     }
     const href = el.getAttribute("href");
     if (href && !href.startsWith("javascript")) {

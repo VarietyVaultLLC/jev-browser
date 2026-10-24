@@ -23,3 +23,13 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm test   # offline: no network, no API key
+
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: node scripts/sync-plugin-version.mjs --check   # plugin.json and .mcp.json match package.json
+      - run: npx -y @anthropic-ai/claude-code plugin validate . --strict

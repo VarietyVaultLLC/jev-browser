@@ -1,0 +1,58 @@
+{
+  "name": "jev-browser",
+  "displayName": "Jev Browser",
+  "version": "0.2.1",
+  "description": "Browser automation where Claude plans one outcome at a time and a fast decision model (Jev, TypeSafe System One) picks every click and keystroke, so Claude rarely has to read page snapshots.",
+  "author": {
+    "name": "Ying-Kai Liao",
+    "url": "https://github.com/Ying-Kai-Liao"
+  },
+  "homepage": "https://github.com/Ying-Kai-Liao/jev-browser#readme",
+  "repository": "https://github.com/Ying-Kai-Liao/jev-browser",
+  "license": "MIT",
+  "keywords": [
+    "browser",
+    "automation",
+    "playwright",
+    "web",
+    "forms",
+    "scraping"
+  ],
+  "documentationUrl": "https://github.com/Ying-Kai-Liao/jev-browser#readme",
+  "supportUrl": "https://github.com/Ying-Kai-Liao/jev-browser/issues",
+  "privacyPolicyUrl": "https://github.com/Ying-Kai-Liao/jev-browser/blob/main/PRIVACY.md",
+  "userConfig": {
+    "typesafe_api_key": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "Key for the TypeSafe System One API (Jev), from https://docs.typesafe.ai. Calls are billed to this key. Set this or the OpenRouter key.",
+      "sensitive": true,
+      "default": ""
+    },
+    "openrouter_api_key": {
+      "type": "string",
+      "title": "OpenRouter API key",
+      "description": "Use Jev through OpenRouter instead, billed to your OpenRouter account (https://openrouter.ai/keys). Used only when no TypeSafe key is set.",
+      "sensitive": true,
+      "default": ""
+    },
+    "headed": {
+      "type": "boolean",
+      "title": "Show the browser window",
+      "description": "Run Chromium visibly and outline each element before Jev acts on it. Needed for logging in by hand and for sites that block headless browsers.",
+      "default": false
+    },
+    "browser": {
+      "type": "string",
+      "title": "Browser",
+      "description": "Run your own browser instead of Playwright's Chromium: chrome, chrome-beta, msedge, or the full path to a Chromium-based browser's executable (Brave, Arc, Vivaldi). Leave empty for Playwright's Chromium.",
+      "default": ""
+    },
+    "browser_profile": {
+      "type": "string",
+      "title": "Browser profile directory",
+      "description": "Absolute path to a persistent Chromium profile, so logins survive restarts. Leave empty for a fresh profile each session.",
+      "default": ""
+    }
+  }
+}
