@@ -5,7 +5,8 @@
 //
 // Env: TYPESAFE_API_KEY or OPENROUTER_API_KEY, JEV_BROWSER_HEADED=1, JEV_BROWSER=chrome|msedge|/path (your browser;
 //      JEV_BROWSER_CHANNEL is the older name), JEV_BROWSER_CDP=http://127.0.0.1:9222 (attach to a running Edge/Chrome
-//      started with --remote-debugging-port; disconnect only, never closed), JEV_BROWSER_PROFILE=/dir (persistent
+//      started with --remote-debugging-port) or =edge|chrome|/profile/dir (your everyday browser, once remote debugging
+//      is allowed at edge://inspect/#remote-debugging); own tabs only, never closed, JEV_BROWSER_PROFILE=/dir (persistent
 //      profile, keeps logins), JEV_BROWSER_LOG=1 (rounds to stderr), JEV_BROWSER_NO_INSTALL=1 (don't download Chromium on first use)
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";

@@ -228,8 +228,14 @@ your everyday profile), `JEV_BROWSER_LOG=1` prints per-round decisions to stderr
 and `JEV_BROWSER_NO_INSTALL=1` turns off the Chromium download on first use.
 `JEV_BROWSER_CDP=http://127.0.0.1:9222` attaches to a browser you already started with
 `--remote-debugging-port` (e.g. `edge-debug.cmd`, which runs a second Edge on its own profile in
-`C:\EdgeDebug`); the session only disconnects from it and never closes it. Edge and Chrome refuse that
-port on your everyday (default) profile, so an attached browser always runs on a dedicated profile.
+`C:\EdgeDebug`). Edge and Chrome ignore that flag on your everyday (default) profile. To attach to your
+everyday, signed-in browser instead, tick "Allow remote debugging for this browser instance" once at
+`edge://inspect/#remote-debugging` (`chrome://inspect/#remote-debugging` in Chrome, version 144 or later) and set
+`JEV_BROWSER_CDP=edge` or `chrome` (Windows), or the browser's profile directory. The browser then asks you to allow
+each new connection. Don't also start it with `--remote-debugging-port`: on the everyday profile that switches the
+setting off for that run. Attached either way, the session works only in tabs it opens itself: it never drives,
+follows, resizes or injects into a tab you have open, and on close it shuts its own tabs and disconnects, leaving
+the browser running.
 `JEV_BROWSER_CHANNEL` is the older name of `JEV_BROWSER` and still works. The MCP server
 reads `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` from its environment, or from the `.env` of a source checkout, but
 never from the `.env` of the directory it was started in.
