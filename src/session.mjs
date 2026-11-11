@@ -9,6 +9,8 @@
 // target, value. Pages too big for one request (see budget.mjs) are split into chunks: each chunk
 // nominates its best elements, then one final request picks among them and answers the rest. Follow-up requests are made only when needed: a key to press, a drag destination,
 // an option to select, or a stricter "is it done" when the answers disagree.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { chromium } from "playwright";
 import { jev } from "./jev.mjs";
 import { fits, chunkElements, compactPage, pageHead, MAX_OPTIONS, DIGEST_MAX_TOKENS } from "./budget.mjs";
@@ -128,18 +130,52 @@ export function browserSetting(env = process.env) {
   return env.JEV_BROWSER || env.JEV_BROWSER_CHANNEL || undefined;
 }
 
+// JEV_BROWSER_CDP: a URL is used as given. "edge" or "chrome" is that browser on your everyday profile, and anything
+// else is a profile directory. Both resolve to the endpoint in the profile's DevToolsActivePort file, which the browser
+// writes once "Allow remote debugging for this browser instance" is ticked at edge://inspect/#remote-debugging
+// (Chromium 144+; the --remote-debugging-port flag is ignored on the everyday profile, and passing it there even
+// switches this off). The browser asks its user to allow each new connection.
+const EVERYDAY = { edge: ["Microsoft", "Edge"], msedge: ["Microsoft", "Edge"], chrome: ["Google", "Chrome"] };
+export function cdpEndpoint(setting, { env = process.env, read = f => readFileSync(f, "utf8") } = {}) {
+  setting = setting?.trim();
+  if (!setting) return undefined;
+  if (/^(https?|wss?):\/\//i.test(setting)) return setting;
+  const named = EVERYDAY[setting.toLowerCase()];
+  if (named && !env.LOCALAPPDATA) throw new Error(`JEV_BROWSER_CDP=${setting} finds the everyday profile on Windows only: set it to the browser's profile directory instead.`);
+  const dir = named ? join(env.LOCALAPPDATA, ...named, "User Data") : setting;
+  const how = `open edge://inspect/#remote-debugging (chrome://inspect/#remote-debugging in Chrome) in that browser and tick "Allow remote debugging for this browser instance" (JEV_BROWSER_CDP=${setting})`;
+  let text;
+  try { text = read(join(dir, "DevToolsActivePort")); } catch { throw new Error(`No remote-debugging endpoint in ${dir}: ${how}.`); }
+  const [port, path] = text.split(/\r?\n/).map(s => s.trim());
+  if (!/^\d+$/.test(port) || !path?.startsWith("/devtools/browser/")) throw new Error(`Unreadable DevToolsActivePort in ${dir}: ${how}.`);
+  return `ws://127.0.0.1:${port}${path}`;
+}
+
+// Runs in every page the session drives: settle() reads __jevMut to tell when the DOM has gone quiet.
+const MUT_INIT = () => {
+  window.__jevMut = performance.now();
+  const mo = new MutationObserver(recs => { if (recs.some(r => r.attributeName !== "data-jev-i")) window.__jevMut = performance.now(); });
+  const go = () => mo.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
+  document ? go() : addEventListener("DOMContentLoaded", go);
+};
+
 export class JevBrowser {
   // userDataDir -> persistent profile (logins survive restarts); browser -> share one Chromium.
   // highlight -> outline each target with Jev's decision before acting (for watching a headed run).
   // use -> the browser to run instead of Playwright's Chromium (default JEV_BROWSER): see browserOptions.
-  // cdpUrl -> attach to an already-running Chromium/Edge started with --remote-debugging-port (JEV_BROWSER_CDP).
+  // cdpUrl -> attach to a Chromium/Edge that is already running (JEV_BROWSER_CDP, see cdpEndpoint). The session then
+  //   works only in tabs it opened: it never drives, follows, resizes or injects into a tab the user has open.
   static async launch({ headed = false, slowMo = 0, viewport = { width: 1280, height: 800 }, storageState, browser, userDataDir, highlight = false, cdpUrl, use = browserSetting() } = {}) {
     let context, own = false;
     const custom = browserOptions(use), opts = { headless: !headed, slowMo, ...custom };
     try {
     if (cdpUrl) {
-      // we never close an attached browser, only disconnect (see close())
-      browser = await chromium.connectOverCDP(cdpUrl);
+      // we never close an attached browser: only our own tabs, then disconnect (see close())
+      const endpoint = cdpEndpoint(cdpUrl);
+      // two minutes: on the everyday profile the browser first asks its user to allow the connection (a dead port fails at once)
+      try { browser = await chromium.connectOverCDP(endpoint, { timeout: 120_000 }); } catch (e) {
+        throw new Error(`Could not attach to ${endpoint} (JEV_BROWSER_CDP=${cdpUrl}): the browser is not running, its remote debugging is off, or the connection was not allowed. ${String(e.message).split("\n")[0]}`);
+      }
       context = browser.contexts()[0] ?? await browser.newContext();
     } else if (userDataDir) {
       context = await chromium.launchPersistentContext(userDataDir, { ...opts, viewport });
@@ -154,33 +190,46 @@ export class JevBrowser {
       if (/Executable doesn't exist|browserType\.launch/i.test(msg) && /install/i.test(msg)) throw new Error("Chromium for Playwright is not installed. Run: npx playwright install chromium");
       throw e;
     }
-    const b = new JevBrowser(browser, context, own);
-    b.cdp = !!cdpUrl; b.highlight = highlight;
-    b.page = context.pages()[0] ?? await context.newPage();
+    const b = new JevBrowser(browser, context, own, { attached: !!cdpUrl });
+    b.highlight = highlight;
+    b.page = b.cdp ? await b.newTab() : context.pages()[0] ?? await context.newPage();   // attached: never take over an open tab
     return b;
   }
 
-  constructor(browser, context, ownBrowser) {
+  constructor(browser, context, ownBrowser, { attached = false } = {}) {
     this.browser = browser; this.context = context; this.ownBrowser = ownBrowser;
+    this.cdp = attached;             // attached to the user's running browser: the whole context is theirs, not ours
+    this.own = new Set();            // attached: the tabs this session opened, the only ones it touches
     this.inflight = new Map(); this.events = []; this.frames = new Map(); this.lastPage = null;
     this.shown = null;               // the page whose element numbers the caller last saw
     this.dialogPolicy = SAFE_DIALOGS;
     this.stats = { calls: 0, jev_ms: 0, tokens: 0 };
-    context.addInitScript(() => {
-      window.__jevMut = performance.now();
-      const mo = new MutationObserver(recs => { if (recs.some(r => r.attributeName !== "data-jev-i")) window.__jevMut = performance.now(); });
-      const go = () => mo.observe(document, { subtree: true, childList: true, attributes: true, characterData: true });
-      document ? go() : addEventListener("DOMContentLoaded", go);
-    });
-    context.addInitScript(WEBMCP_INIT);
-    const track = r => ["fetch", "xhr", "document"].includes(r.resourceType()) && this.inflight.set(r, Date.now());
+    if (!attached) { context.addInitScript(MUT_INIT); context.addInitScript(WEBMCP_INIT); }   // attached: per tab, in adopt()
+    const ours = r => { if (!this.cdp) return true; try { return this.own.has(r.frame().page()); } catch { return false; } };
+    const track = r => ["fetch", "xhr", "document"].includes(r.resourceType()) && ours(r) && this.inflight.set(r, Date.now());
     const untrack = r => this.inflight.delete(r);
     context.on("request", track); context.on("requestfinished", untrack); context.on("requestfailed", untrack);
-    context.on("page", p => {
+    context.on("page", async p => {
+      if (this.cdp) {   // a new tab is ours only when one of our tabs opened it; one the user opens is never followed
+        const opener = await p.opener().catch(() => null);
+        if (!opener || !this.own.has(opener)) return;
+        await this.adopt(p);   // the scripts reach this tab from its next navigation on
+      }
       if (this.viewport) this.resize(p).catch(() => {});
       if (this._page && p !== this._page) { this.events.push(`new tab opened: ${p.url()}`); this.page = p; }
     });
   }
+
+  // Attached only: mark a tab as this session's and give it the scripts a launched context gets as a whole.
+  async adopt(p) {
+    this.own.add(p);
+    p.on("close", () => this.own.delete(p));
+    await p.addInitScript(MUT_INIT); await p.addInitScript(WEBMCP_INIT);
+    return p;
+  }
+  async newTab() { return this.adopt(await this.context.newPage()); }
+  // The tabs this session may touch: every tab of a browser it launched, only its own in an attached one.
+  tabs() { return this.context.pages().filter(p => !this.cdp || this.own.has(p)); }
 
   get page() { return this._page; }
   set page(p) {
@@ -191,7 +240,7 @@ export class JevBrowser {
       this.events.push(`${d.type()} dialog "${d.message().slice(0, 100)}" ${accept ? "accepted" : "dismissed"}`);
       await (accept ? d.accept(this.promptText ?? undefined) : d.dismiss()).catch(() => {});
     });
-    p.on("close", () => { if (this._page === p) { const rest = this.context.pages(); if (rest.length) { this._page = rest.at(-1); this.events.push("tab closed; switched to previous tab"); } } });
+    p.on("close", () => { if (this._page === p) { const rest = this.tabs().filter(q => q !== p); if (rest.length) { this._page = rest.at(-1); this.events.push("tab closed; switched to previous tab"); } } });
   }
 
   // Quiet = no fetch/xhr/document request in flight (ignoring ones older than 5s, e.g. long-poll)
@@ -212,9 +261,10 @@ export class JevBrowser {
   // viewport: { width, height } or "390x844"; it sticks for later pages and every tab, open or new.
   async open(url, { viewport } = {}) {
     const t0 = Date.now();
+    if (this.cdp && this.page.isClosed()) this.page = await this.newTab();   // our last tab was closed: a new one, never the user's
     if (viewport) {
       this.viewport = typeof viewport === "string" ? parseViewport(viewport) : viewport;
-      await Promise.all(this.context.pages().map(p => this.resize(p)));
+      await Promise.all(this.tabs().map(p => this.resize(p)));
     }
     await this.page.goto(url, { waitUntil: "commit", timeout: 30_000 });
     await this.page.waitForLoadState("domcontentloaded", { timeout: 15_000 }).catch(() => {});
@@ -928,6 +978,10 @@ export class JevBrowser {
   }
 
   async screenshot({ path, fullPage = false } = {}) { return this.page.screenshot({ path, fullPage }); }
-  async close() { if (this.cdp) { await this.browser.close().catch(() => {}); return; }   // CDP: disconnect only, leave the user's browser open
+  async close() {
+    if (this.cdp) {   // attached: close the tabs we opened, then disconnect; the user's browser and their tabs stay
+      await Promise.all([...this.own].map(p => p.close().catch(() => {})));
+      await this.browser.close().catch(() => {}); return;
+    }
     await this.context.close().catch(() => {}); if (this.ownBrowser) await this.browser.close().catch(() => {}); }
 }
